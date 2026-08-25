@@ -6,7 +6,7 @@ FastAPI поверх `routeforge.pipeline`. Без состояния: расч�
 укладывается в один запрос.
 
 ```bash
-pip install -e . fastapi "uvicorn[standard]" prometheus-client
+pip install -e ".[api]"
 uvicorn services.api.main:app --reload
 ```
 

@@ -32,7 +32,7 @@
 ```bash
 git clone https://github.com/ValeriyPronkin/routeforge
 cd routeforge
-pip install -e ".[app,dev]"
+pip install -e ".[app,api,dev]"
 
 python scripts/make_sample_data.py     # 240 синтетических точек и 3 базы
 streamlit run app/streamlit_app.py     # интерактивный расчёт в браузере
@@ -97,7 +97,7 @@ print(f"{result.vehicles_used} машин, {result.total_distance_m / 1000:.0f} 
 ## Разработка
 
 ```bash
-pip install -e ".[app,dev]"
+pip install -e ".[app,api,dev]"
 pytest
 ```
 
