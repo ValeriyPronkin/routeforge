@@ -16,13 +16,18 @@ from ortools.constraint_solver import pywrapcp, routing_enums_pb2
 
 @dataclass(frozen=True)
 class Fleet:
-    """Однородный парк машин.
+    """Парк машин: однородный или разнородный.
 
     :param count: число машин.
     :param capacity: вместимость одной машины в тех же единицах, что и спрос.
     :param max_time_min: предел смены в минутах.
     :param speed_kmh: средняя скорость — переводит расстояние во время.
     :param service_time_min: время обслуживания одной точки.
+    :param capacities: вместимость по машинам. Задаётся, когда парк реальный
+        и машины разные; ``None`` — у всех одинаковая ``capacity``.
+    :param max_times_min: остаток смены по машинам. Нужен, когда машина уже
+        отработала часть дня в другом кластере: у неё меньше времени, чем у
+        только что вышедшей.
     """
 
     count: int
@@ -30,6 +35,28 @@ class Fleet:
     max_time_min: int = 8 * 60
     speed_kmh: float = 40.0
     service_time_min: int = 10
+    capacities: tuple[int, ...] | None = None
+    max_times_min: tuple[int, ...] | None = None
+
+    def __post_init__(self) -> None:
+        for name in ("capacities", "max_times_min"):
+            values = getattr(self, name)
+            if values is not None and len(values) != self.count:
+                raise ValueError(
+                    f"длина {name} ({len(values)}) не совпадает с числом машин ({self.count})"
+                )
+
+    @property
+    def capacity_per_vehicle(self) -> list[int]:
+        if self.capacities is None:
+            return [int(self.capacity)] * self.count
+        return [int(c) for c in self.capacities]
+
+    @property
+    def time_per_vehicle(self) -> list[int]:
+        if self.max_times_min is None:
+            return [int(self.max_time_min)] * self.count
+        return [int(t) for t in self.max_times_min]
 
 
 @dataclass(frozen=True)
@@ -177,14 +204,21 @@ def solve_cvrp(
         return int(travel_min + fleet.service_time_min)
 
     time_index = routing.RegisterTransitCallback(time_callback)
-    routing.AddDimension(time_index, 0, fleet.max_time_min, True, "Time")
+    times = fleet.time_per_vehicle
+    # Горизонт измерения общий, а предел у каждой машины свой: у той, что уже
+    # отработала часть дня, времени меньше. Одним AddDimension этого не
+    # выразить, поэтому потолок ставится машине отдельно, на конце маршрута.
+    routing.AddDimension(time_index, 0, max(times) if times else 0, True, "Time")
+    time_dimension = routing.GetDimensionOrDie("Time")
+    for vehicle, limit in enumerate(times):
+        time_dimension.CumulVar(routing.End(vehicle)).SetMax(limit)
 
     def demand_callback(from_index: int) -> int:
         return demands[manager.IndexToNode(from_index)]
 
     demand_index = routing.RegisterUnaryTransitCallback(demand_callback)
     routing.AddDimensionWithVehicleCapacity(
-        demand_index, 0, [fleet.capacity] * fleet.count, True, "Capacity"
+        demand_index, 0, fleet.capacity_per_vehicle, True, "Capacity"
     )
 
     if config.drop_penalty is not None:

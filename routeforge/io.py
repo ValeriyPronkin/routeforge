@@ -41,6 +41,19 @@ DEPOT_COLUMN_ALIASES: dict[str, tuple[str, ...]] = {
 }
 
 
+#: Синонимы колонок файла машин. Номер здесь обязателен по смыслу, а не по
+#: проверке: без него в отчёте остаётся индекс, по которому машину не найти.
+VEHICLE_COLUMN_ALIASES: dict[str, tuple[str, ...]] = {
+    "id": ("id", "номер", "гос. номер", "гос.номер", "госномер", "гос номер",
+           "№ п/п", "код"),
+    "capacity": ("capacity", "вместимость", "грузоподъёмность", "грузоподъемность",
+                 "объем кузова", "объём кузова", "объем (вместимость) кузова"),
+    "max_time_min": ("max_time_min", "смена", "смена, мин", "время работы",
+                     "рабочее время", "максимальное время работы"),
+    "depot": ("depot", "база", "гараж", "индекс базы"),
+}
+
+
 class ValidationError(ValueError):
     """Данные не годятся для расчёта."""
 
@@ -200,6 +213,57 @@ def read_depots(
     df["name"] = df["name"].fillna(df["id"].astype(str)).astype(str)
 
     return df[["id", "name", "lat", "lon", "capacity"]].reset_index(drop=True)
+
+
+def read_vehicles(
+    source: str | Path | IO[bytes],
+    *,
+    sheet: str | int = 0,
+) -> pd.DataFrame:
+    """Читает реестр машин из csv или xlsx.
+
+    Возвращает DataFrame с колонками ``id``, ``capacity``, ``max_time_min``,
+    ``depot``. Одна строка — одна машина: парк разнородный, у каждой своя
+    вместимость.
+
+    Обязательна только вместимость. Пустая смена означает «как в настройках
+    расчёта», пустая база — «машина доступна любой базе». Номера, если
+    колонки нет, проставляются как ``ТС 0``, ``ТС 1`` — но лучше, чтобы он
+    был настоящим: номер идёт до таблицы маршрутов.
+    """
+    name = _source_name(source)
+    df = normalize_columns(_read_table(source, name, sheet), VEHICLE_COLUMN_ALIASES)
+
+    if "capacity" not in df.columns:
+        raise ValidationError(
+            f"В файле машин {name} нет колонки вместимости. "
+            f"Найдено: {list(df.columns)}. Ожидается одно из имён "
+            f"{VEHICLE_COLUMN_ALIASES['capacity']}."
+        )
+
+    df = df.copy()
+    if df.empty:
+        raise ValidationError(f"В файле машин {name} нет ни одной строки.")
+
+    df["capacity"] = _to_float(df["capacity"])
+    bad = ~(df["capacity"] > 0)
+    if bad.any():
+        # Машина с нулевой или пустой вместимостью не увезёт ничего, а в
+        # расчёте будет выглядеть полноценной. Это ошибка файла, а не строка
+        # на выброс: парк собирают руками, и молча терять из него машину хуже,
+        # чем не посчитать вовсе.
+        raise ValidationError(
+            f"В файле машин {name} {int(bad.sum())} строк без вместимости, "
+            f"первые индексы: {df.index[bad][:5].tolist()}"
+        )
+
+    df["max_time_min"] = _to_float(df["max_time_min"]) if "max_time_min" in df.columns else np.nan
+    df["depot"] = _to_float(df["depot"]) if "depot" in df.columns else np.nan
+    if "id" not in df.columns:
+        df["id"] = [f"ТС {i}" for i in range(len(df))]
+    df["id"] = df["id"].astype(str)
+
+    return df[["id", "capacity", "max_time_min", "depot"]].reset_index(drop=True)
 
 
 def depot_capacities(depots: pd.DataFrame) -> list[float] | None:

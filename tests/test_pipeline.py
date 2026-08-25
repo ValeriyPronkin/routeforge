@@ -4,6 +4,7 @@ import pytest
 from routeforge.clustering import UNASSIGNED
 from routeforge.config import Settings
 from routeforge.pipeline import plan_routes
+from routeforge.fleet import Vehicle
 from routeforge.solver import Fleet
 
 FAST = Settings(distance_method="haversine", max_sites_per_cluster=20, solver_time_limit_s=2)
@@ -56,8 +57,11 @@ async def test_routes_table_matches_solutions(sites):
     table = result.routes_table()
     assert len(table) == result.vehicles_used
     assert set(table.columns) == {
-        "depot", "cluster", "vehicle", "stops", "distance_km", "duration_min", "load",
+        "depot", "cluster", "vehicle", "vehicle_id", "stops",
+        "distance_km", "duration_min", "load",
     }
+    # Без реестра машины безымянны — колонка есть, но пустая.
+    assert (table["vehicle_id"] == "").all()
     assert table["distance_km"].sum() == pytest.approx(result.total_distance_m / 1000, abs=0.5)
 
 
@@ -174,3 +178,81 @@ async def test_explicit_fleet_is_not_silently_enlarged(strung_out_sites):
     )
     assert result.vehicles_used == 1
     assert result.dropped, "при одной машине линию не объехать целиком"
+
+
+# ----------------------------------------------------------- реестр машин
+
+REGISTRY = dict(
+    distance_method="haversine",
+    max_sites_per_cluster=8,     # чтобы кластеров было несколько
+    vehicle_speed_kmh=40.0,
+    service_time_min=10,
+    solver_time_limit_s=2,
+)
+
+
+def registry(*specs) -> list[Vehicle]:
+    """Реестр из троек (номер, вместимость, смена)."""
+    return [Vehicle(id=n, capacity=c, max_time_min=t) for n, c, t in specs]
+
+
+async def test_vehicle_number_reaches_the_routes_table(sites):
+    """Номер обязан дойти до отчёта.
+
+    В исходном приложении он терялся по дороге: сводка строилась по «индексу
+    машины», и какая именно машина отработала маршрут, из отчёта было не
+    узнать.
+    """
+    fleet = registry(("А001", 4000, 480), ("В002", 4000, 480))
+    result = await plan_routes(sites, DEPOTS, settings=Settings(**REGISTRY), vehicles=fleet)
+    table = result.routes_table()
+    assert set(table["vehicle_id"]) <= {"А001", "В002"}
+    assert (table["vehicle_id"] != "").all()
+
+
+async def test_vehicle_never_works_longer_than_its_shift(sites):
+    """Главный инвариант раздачи: машина не может отработать больше смены.
+
+    Ради него ресурс и списывается после каждого кластера. Считать парк
+    заново на каждом кластере — значит выпустить одну и ту же машину дважды
+    в одно и то же время.
+    """
+    fleet = registry(("А001", 4000, 300), ("В002", 4000, 300), ("С003", 4000, 300))
+    result = await plan_routes(sites, DEPOTS, settings=Settings(**REGISTRY), vehicles=fleet)
+    worked = result.routes_table().groupby("vehicle_id")["duration_min"].sum()
+    for number, minutes in worked.items():
+        limit = next(v.max_time_min for v in fleet if v.id == number)
+        assert minutes <= limit, f"{number} отработала {minutes} мин при смене {limit}"
+
+
+async def test_exhausted_fleet_leaves_points_without_routes(sites):
+    """Кончились машины — точки уходят в потери, а не пропадают молча."""
+    result = await plan_routes(
+        sites, DEPOTS, settings=Settings(**REGISTRY), vehicles=registry(("А001", 500, 90))
+    )
+    assert result.dropped, "ожидались точки без маршрута"
+    served = sum(len(r.nodes) - 2 for s in result.solutions.values() for r in s.routes)
+    assert served + len(result.unserved) == len(sites)
+
+
+async def test_vehicle_bound_to_depot_does_not_serve_another(sites):
+    fleet = [
+        Vehicle(id="А001", capacity=4000, max_time_min=480, depot=0),
+        Vehicle(id="В002", capacity=4000, max_time_min=480, depot=1),
+    ]
+    result = await plan_routes(sites, DEPOTS, settings=Settings(**REGISTRY), vehicles=fleet)
+    table = result.routes_table()
+    for number, depot in zip(table["vehicle_id"], table["depot"]):
+        expected = next(v.depot for v in fleet if v.id == number)
+        assert depot == expected
+
+
+async def test_registry_beats_the_estimate(sites):
+    """Реестр — ограничение задачи, а не подсказка.
+
+    Оценка парка добрала бы машин, сколько нужно; с реестром машин ровно
+    столько, сколько их есть, и добор отключается.
+    """
+    one = registry(("А001", 10_000, 480))
+    result = await plan_routes(sites, DEPOTS, settings=Settings(**REGISTRY), vehicles=one)
+    assert set(result.routes_table()["vehicle_id"]) == {"А001"}

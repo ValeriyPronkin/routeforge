@@ -16,6 +16,7 @@ from loguru import logger
 from .clustering import UNASSIGNED, assign_to_depots, optimal_k_by_cluster_size
 from .config import Settings
 from .distance import Coord, distance_matrix
+from .fleet import Vehicle, VehiclePool
 from .solver import Fleet, Solution, SolverConfig, estimate_vehicles, solve_cvrp
 
 
@@ -33,6 +34,10 @@ class PlanResult:
     #: Это отдельный вид потерь, и путать его с предыдущим нельзя — лечится
     #: он другим: парком и длиной смены, а не мощностью баз.
     dropped: list[int] = field(default_factory=list)
+    #: Номера машин по ключу ``(depot, cluster)``, в порядке индексов внутри
+    #: решения: ``vehicle_ids[key][route.vehicle]`` — номер этой машины.
+    #: Пусто, когда расчёт шёл без реестра и машины безымянны.
+    vehicle_ids: dict[tuple[int, int], list[str]] = field(default_factory=dict)
 
     @property
     def unserved(self) -> list[int]:
@@ -51,12 +56,18 @@ class PlanResult:
         """Плоская таблица маршрутов — то, что уходит в отчёт."""
         rows = []
         for (depot, cluster), solution in sorted(self.solutions.items()):
+            numbers = self.vehicle_ids.get((depot, cluster), [])
             for route in solution.routes:
                 rows.append(
                     {
                         "depot": depot,
                         "cluster": cluster,
                         "vehicle": route.vehicle,
+                        # Номер из реестра. Без него в отчёте остаётся индекс,
+                        # по которому конкретную машину уже не найти.
+                        "vehicle_id": (
+                            numbers[route.vehicle] if route.vehicle < len(numbers) else ""
+                        ),
                         "stops": max(0, len(route.nodes) - 2),
                         "distance_km": round(route.distance_m / 1000, 2),
                         "duration_min": route.duration_min,
@@ -73,6 +84,7 @@ async def plan_routes(
     settings: Settings | None = None,
     depot_capacities: list[float] | None = None,
     fleet: Fleet | None = None,
+    vehicles: list[Vehicle] | None = None,
 ) -> PlanResult:
     """Планирует объезд: базы -> кластеры -> маршруты.
 
@@ -82,6 +94,10 @@ async def plan_routes(
     :param depot_capacities: мощность баз; ``None`` — не ограничивать.
     :param fleet: парк машин; ``None`` — собрать из ``settings``, а число
         машин на каждый кластер оценить автоматически.
+    :param vehicles: реестр реальных машин. Задан — парк перестаёт быть
+        оценкой: машины раздаются по кластерам из общего списка, у каждой
+        убывает остаток времени, и одна и та же машина не может оказаться в
+        двух кластерах сразу. Не хватило машин — точки уйдут в ``dropped``.
     """
     settings = settings or Settings()
     sites = sites.reset_index(drop=True).copy()
@@ -103,6 +119,16 @@ async def plan_routes(
     result = PlanResult(sites=sites)
     result.unassigned = sites.index[sites["depot"] == UNASSIGNED].tolist()
 
+    pool = (
+        VehiclePool(
+            vehicles,
+            min_remaining_min=settings.vehicle_min_remaining_min,
+            capacity_reserve=settings.fleet_capacity_reserve,
+        )
+        if vehicles is not None
+        else None
+    )
+
     # 3. Дробление крупных групп и решение CVRP внутри каждой.
     sites["cluster"] = 0
     for depot_id in sorted(set(sites["depot"]) - {UNASSIGNED}):
@@ -111,16 +137,60 @@ async def plan_routes(
         _, labels = optimal_k_by_cluster_size(coords, settings.max_sites_per_cluster)
         sites.loc[block.index, "cluster"] = labels
 
-        for cluster_id in sorted(set(labels)):
+        for cluster_id in _cluster_order(block, labels, by_demand=pool is not None):
             chunk = block[labels == cluster_id]
-            solution = await _solve_chunk(chunk, depots[depot_id], settings, fleet)
-            result.solutions[(int(depot_id), int(cluster_id))] = solution
+            key = (int(depot_id), int(cluster_id))
+
+            if pool is None:
+                solution = await _solve_chunk(chunk, depots[depot_id], settings, fleet)
+            else:
+                picked = pool.pick(float(chunk["demand"].sum()), depot=int(depot_id))
+                result.vehicle_ids[key] = [v.id for v in picked]
+                if not picked:
+                    # Свободных машин не осталось. Молчать нельзя: кластер
+                    # целиком уходит в потери, и это должно быть видно.
+                    logger.warning(
+                        "Кластер {}: свободных машин нет, {} точек без маршрута",
+                        key, len(chunk),
+                    )
+                    result.solutions[key] = Solution()
+                    result.dropped.extend(int(i) for i in chunk.index)
+                    continue
+                solution = await _solve_chunk(
+                    chunk,
+                    depots[depot_id],
+                    settings,
+                    pool.as_fleet(
+                        picked,
+                        speed_kmh=settings.vehicle_speed_kmh,
+                        service_time_min=settings.service_time_min,
+                    ),
+                )
+                # Отработанное списывается сразу: следующий кластер должен
+                # увидеть машину с тем временем, что у неё реально осталось.
+                for route in solution.routes:
+                    pool.spend(picked[route.vehicle], route.duration_min)
+
+            result.solutions[key] = solution
             # Узлы нумеруются внутри кластера, причём нулевой — это база,
             # поэтому обслуживаемая точка n соответствует chunk.index[n - 1].
             result.dropped.extend(int(chunk.index[n - 1]) for n in solution.dropped)
 
     result.sites = sites
     return result
+
+
+def _cluster_order(block: pd.DataFrame, labels: np.ndarray, *, by_demand: bool) -> list[int]:
+    """В каком порядке считать кластеры одной базы.
+
+    При работе от реестра — по убыванию спроса: парк конечен, и крупные
+    кластеры должны получить машины первыми. Иначе порядок не важен, и
+    сортировка по номеру оставляет вывод предсказуемым.
+    """
+    ids = sorted(set(int(v) for v in labels))
+    if not by_demand:
+        return ids
+    return sorted(ids, key=lambda c: float(block[labels == c]["demand"].sum()), reverse=True)
 
 
 async def _solve_chunk(
