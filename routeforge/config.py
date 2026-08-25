@@ -35,9 +35,16 @@ class Settings:
     service_time_min: int = 10
     #: Сколько секунд солверу на один кластер.
     solver_time_limit_s: int = 30
+    #: Заголовок и подзаголовок приложения. Вынесены в настройки, чтобы
+    #: инструмент можно было назвать под свою задачу, не трогая код.
+    app_title: str = "routeforge"
+    app_subtitle: str = "Распределение точек по базам, кластеризация и построение маршрутов"
     #: Каталоги ввода-вывода.
     input_dir: Path = field(default_factory=lambda: Path("data/input"))
     output_dir: Path = field(default_factory=lambda: Path("data/output"))
+    #: Куда писать журнал работы.
+    log_dir: Path = field(default_factory=lambda: Path("logs"))
+    log_level: str = "INFO"
     #: Ключ геокодера Яндекса. Только из окружения, никогда из файла.
     yandex_api_key: str | None = None
 
@@ -74,7 +81,7 @@ class Settings:
                 data[f.name] = int(value)
             elif f.type in {"float", float}:
                 data[f.name] = float(value)
-            elif f.name in {"input_dir", "output_dir"}:
+            elif f.name in {"input_dir", "output_dir", "log_dir"}:
                 data[f.name] = Path(value)
         return cls(**data)
 
@@ -84,4 +91,5 @@ class Settings:
         data.pop("yandex_api_key", None)
         data["input_dir"] = str(self.input_dir)
         data["output_dir"] = str(self.output_dir)
+        data["log_dir"] = str(self.log_dir)
         return data

@@ -27,3 +27,4 @@ data/output/
 osrm-data/
 *.osm.pbf
 *.osrm*
+logs/

@@ -81,11 +81,20 @@ def plot_routes(
     polylines: Sequence[Sequence[Coord]],
     *,
     fmap: folium.Map | None = None,
+    colors: Sequence[str] | None = None,
+    labels: Sequence[str] | None = None,
     weight: int = 3,
     opacity: float = 0.8,
 ) -> folium.Map:
     """Маршруты поверх карты. Ожидает результат
-    :func:`routeforge.polylines.route_polylines` — по ломаной на маршрут."""
+    :func:`routeforge.polylines.route_polylines` — по ломаной на маршрут.
+
+    :param colors: цвет каждого маршрута. По умолчанию берётся по порядку из
+        палитры — но тогда при отрисовке подмножества маршрутов цвета
+        разъедутся с теми, что были на полной карте. Если маршруты где-то
+        перечислены ещё раз (в таблице, в легенде), цвета лучше задавать явно.
+    :param labels: подписи во всплывающей подсказке.
+    """
     flat = [p for line in polylines for p in line]
     fmap = fmap or base_map(flat)
     for i, line in enumerate(polylines):
@@ -93,10 +102,10 @@ def plot_routes(
             continue
         folium.PolyLine(
             locations=[tuple(p) for p in line],
-            color=color_for(i),
+            color=colors[i] if colors is not None else color_for(i),
             weight=weight,
             opacity=opacity,
-            popup=f"Маршрут {i}",
+            popup=labels[i] if labels is not None else f"Маршрут {i}",
         ).add_to(fmap)
     return fmap
 

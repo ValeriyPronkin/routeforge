@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 import pandas as pd
@@ -18,14 +19,75 @@ from streamlit_folium import st_folium
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from routeforge.config import Settings  # noqa: E402
-from routeforge.io import ValidationError, read_points  # noqa: E402
-from routeforge.pipeline import plan_routes_sync  # noqa: E402
-from routeforge.polylines import straight_polylines  # noqa: E402
-from routeforge.viz import plot_depots, plot_routes, plot_sites  # noqa: E402
+from loguru import logger  # noqa: E402
 
-st.set_page_config(page_title="routeforge", page_icon="🚚", layout="wide")
-st.title("routeforge — планирование объезда точек")
+from routeforge.config import Settings  # noqa: E402
+from routeforge.distance import Coord  # noqa: E402
+from routeforge.io import ValidationError, read_points  # noqa: E402
+from routeforge.logs import setup_logging  # noqa: E402
+from routeforge.pipeline import PlanResult, plan_routes_sync  # noqa: E402
+from routeforge.polylines import straight_polylines  # noqa: E402
+from routeforge.viz import color_for, plot_depots, plot_routes, plot_sites  # noqa: E402
+
+# Настройки читаются из config.yaml рядом с проектом; переменные окружения
+# с префиксом ROUTEFORGE_ имеют приоритет. Числовые параметры расчёта ниже
+# задаются виджетами, а имя и журнал берутся отсюда.
+BASE = Settings.load(ROOT / "config.yaml")
+LOG_PATH = setup_logging(BASE)
+
+st.set_page_config(page_title=BASE.app_title, page_icon="🚚", layout="wide")
+
+#: folium понимает несколько имён, которых нет в CSS, — для плашек в таблице
+#: нужен цвет, который поймёт браузер.
+CSS_COLOR = {"darkpurple": "#5b2c6f", "cadetblue": "#5f9ea0", "beige": "#d8c9a3"}
+
+
+@dataclass
+class RouteRow:
+    """Строка результата вместе с её геометрией и цветом на карте.
+
+    Таблица и карта строятся из одного списка — иначе цвета в них
+    разъезжаются при первом же изменении порядка.
+    """
+
+    depot: int
+    cluster: int
+    vehicle: int
+    stops: int
+    distance_km: float
+    duration_min: int
+    load: int
+    polyline: list[Coord]
+    colour: str
+
+    @property
+    def label(self) -> str:
+        return f"База {self.depot} · кластер {self.cluster} · машина {self.vehicle}"
+
+
+def build_rows(result: PlanResult, depots: list[Coord]) -> list[RouteRow]:
+    rows: list[RouteRow] = []
+    for (depot_id, cluster_id), solution in sorted(result.solutions.items()):
+        chunk = result.sites[
+            (result.sites["depot"] == depot_id) & (result.sites["cluster"] == cluster_id)
+        ]
+        nodes = [depots[depot_id], *chunk[["lat", "lon"]].itertuples(index=False, name=None)]
+        lines = straight_polylines([r.nodes for r in solution.routes], nodes)
+        for route, line in zip(solution.routes, lines):
+            rows.append(
+                RouteRow(
+                    depot=depot_id,
+                    cluster=cluster_id,
+                    vehicle=route.vehicle,
+                    stops=max(0, len(route.nodes) - 2),
+                    distance_km=round(route.distance_m / 1000, 2),
+                    duration_min=route.duration_min,
+                    load=route.load,
+                    polyline=line,
+                    colour=color_for(len(rows)),
+                )
+            )
+    return rows
 
 
 @st.cache_data
@@ -35,6 +97,18 @@ def load_sample() -> tuple[pd.DataFrame, pd.DataFrame]:
     return sites, depots
 
 
+def metrics_row(pairs: list[tuple[str, str]]) -> None:
+    """Метрики в одну строку. Вертикальной колонкой они занимают пол-экрана
+    и перетягивают внимание на себя, хотя главное здесь — карта."""
+    for column, (label, value) in zip(st.columns(len(pairs)), pairs):
+        column.metric(label, value)
+
+
+def spaced(number: float) -> str:
+    return f"{number:,.0f}".replace(",", " ")
+
+
+# ---------------------------------------------------------------- сайдбар
 with st.sidebar:
     st.header("Данные")
     uploaded = st.file_uploader("Точки (csv или xlsx)", type=["csv", "xlsx"])
@@ -54,14 +128,47 @@ with st.sidebar:
     service = st.number_input("Время на точке, мин", 0, 120, 10)
 
     st.header("Расчёт")
-    max_per_cluster = st.slider("Точек в кластере", 20, 500, 60, step=10)
+    max_per_cluster = st.slider(
+        "Точек в кластере", 20, 500, 60, step=10,
+        help="Верхний предел размера группы, которую получает солвер. "
+        "Больше — маршруты аккуратнее, но расчёт дольше.",
+    )
     time_limit = st.slider("Секунд солверу на кластер", 1, 60, 5)
 
-    run = st.button("Рассчитать", type="primary", use_container_width=True)
+    run = st.button("Рассчитать", type="primary", width="stretch")
+    st.caption(f"Журнал работы: `{Path(BASE.log_dir) / 'routeforge.log'}`")
+
+# ---------------------------------------------------------------- шапка
+st.title(BASE.app_title)
+st.caption(BASE.app_subtitle)
+
+with st.expander("Что означают «база», «кластер» и «машина»"):
+    st.markdown(
+        """
+**База** — место, откуда машина выезжает и куда возвращается: склад,
+распределительный центр, гараж, площадка выгрузки. В задаче маршрутизации
+это депо. Баз может быть несколько, у каждой своя мощность — сколько она
+способна принять или отгрузить за период.
+
+**Кластер** — группа точек внутри одной базы. Решать маршруты сразу для
+всех точек базы невыгодно: время расчёта растёт быстрее линейного, и одна
+задача на 3000 точек считается дольше, чем десять по 300. Поэтому точки
+базы дробятся на группы по числу из «Точек в кластере», и внутри каждой
+маршруты считаются отдельно.
+
+**Машина** — один маршрут: выезд с базы, объезд точек, возврат. Сколько
+машин понадобится, определяется вместимостью и длительностью смены, а не
+задаётся вручную.
+
+Порядок такой: точки распределяются **по базам** (каждая уходит на
+ближайшую, у которой хватает мощности), затем точки каждой базы дробятся
+**на кластеры**, и уже внутри кластера строятся **маршруты машин**.
+        """
+    )
 
 try:
     if uploaded is not None:
-        sites = read_points(uploaded if uploaded.name.endswith(".csv") else uploaded)
+        sites = read_points(uploaded)
         depots_df = load_sample()[1]
         st.info("Загружены ваши точки; базы взяты из демо-набора.")
     else:
@@ -70,23 +177,31 @@ except (ValidationError, FileNotFoundError) as exc:
     st.error(str(exc))
     st.stop()
 
-depots = list(depots_df[["lat", "lon"]].itertuples(index=False, name=None))
+depots: list[Coord] = list(depots_df[["lat", "lon"]].itertuples(index=False, name=None))
 
-left, right = st.columns([2, 1])
-with right:
-    st.metric("Точек", len(sites))
-    st.metric("Баз", len(depots))
-    st.metric("Суммарный спрос", f"{int(sites['demand'].sum()):,}".replace(",", " "))
-
+# ---------------------------------------------------------------- до расчёта
 if not run:
-    with left:
-        st.subheader("Исходные данные")
-        fmap = plot_sites(list(sites[["lat", "lon"]].itertuples(index=False, name=None)))
-        plot_depots(depots, fmap=fmap, names=depots_df.get("name"))
-        st_folium(fmap, height=520, use_container_width=True, returned_objects=[])
+    metrics_row(
+        [
+            ("Точек", spaced(len(sites))),
+            ("Баз", str(len(depots))),
+            ("Суммарный спрос", spaced(sites["demand"].sum())),
+        ]
+    )
+    fmap = plot_sites(list(sites[["lat", "lon"]].itertuples(index=False, name=None)))
+    plot_depots(depots, fmap=fmap, names=depots_df.get("name"))
+    # у st_folium width — это ширина в пикселях, а не режим,
+    # поэтому здесь остаётся собственный флаг компонента
+    st_folium(fmap, height=560, use_container_width=True, returned_objects=[])
+    st.info("Нажмите «Рассчитать» в панели слева.")
     st.stop()
 
+# ---------------------------------------------------------------- расчёт
 settings = Settings(
+    app_title=BASE.app_title,
+    app_subtitle=BASE.app_subtitle,
+    log_dir=BASE.log_dir,
+    log_level=BASE.log_level,
     distance_method=method,
     osrm_url=osrm_url,
     max_sites_per_cluster=max_per_cluster,
@@ -97,42 +212,126 @@ settings = Settings(
     solver_time_limit_s=int(time_limit),
 )
 
+logger.info(
+    "Расчёт: {} точек, {} баз, метод {}, вместимость {}, лимит солвера {} с",
+    len(sites), len(depots), method, capacity, time_limit,
+)
 with st.spinner("Считаем маршруты…"):
     try:
         result = plan_routes_sync(
             sites, depots, settings=settings, depot_capacities=list(depots_df["capacity"])
         )
     except RuntimeError as exc:
+        logger.exception("Расчёт не удался")
         st.error(f"Не удалось получить расстояния: {exc}")
+        st.caption(f"Подробности в журнале: `{LOG_PATH}`")
         st.stop()
+logger.info(
+    "Готово: {} кластеров, {} маршрутов, {:.1f} км, не распределено {}",
+    len(result.solutions), result.vehicles_used,
+    result.total_distance_m / 1000, len(result.unassigned),
+)
 
-lines: list[list[tuple[float, float]]] = []
-for (depot_id, cluster_id), solution in sorted(result.solutions.items()):
-    chunk = result.sites[
-        (result.sites["depot"] == depot_id) & (result.sites["cluster"] == cluster_id)
+rows = build_rows(result, depots)
+
+metrics_row(
+    [
+        ("Точек", spaced(len(sites))),
+        ("Баз", str(len(depots))),
+        ("Кластеров", str(len(result.solutions))),
+        ("Маршрутов", str(len(rows))),
+        ("Пробег, км", spaced(result.total_distance_m / 1000)),
+        ("Не распределено", str(len(result.unassigned))),
     ]
-    nodes = [depots[depot_id], *chunk[["lat", "lon"]].itertuples(index=False, name=None)]
-    lines.extend(straight_polylines([r.nodes for r in solution.routes], nodes))
-
-with right:
-    st.metric("Машин", result.vehicles_used)
-    st.metric("Общий пробег", f"{result.total_distance_m / 1000:,.0f} км".replace(",", " "))
-    if result.unassigned:
-        st.warning(f"Не распределено точек: {len(result.unassigned)} — не хватило мощности баз.")
-
-with left:
-    st.subheader("Маршруты")
-    fmap = plot_sites(
-        list(result.sites[["lat", "lon"]].itertuples(index=False, name=None)),
-        labels=result.sites["depot"].tolist(),
+)
+if result.unassigned:
+    st.warning(
+        f"{len(result.unassigned)} точек не приняла ни одна база — не хватило мощности."
     )
-    plot_depots(depots, fmap=fmap, names=depots_df.get("name"))
-    plot_routes(lines, fmap=fmap)
-    st_folium(fmap, height=520, use_container_width=True, returned_objects=[])
 
+# ---------------------------------------------------------------- карта
+left, right = st.columns([3, 2])
+with left:
+    chosen = st.selectbox(
+        "Показать маршруты", ["Все"] + [row.label for row in rows]
+    )
+with right:
+    painting = st.radio(
+        "Раскраска точек",
+        ["по базам", "по кластерам"],
+        horizontal=True,
+        help="По базам — видно, какая точка к какой базе приписана. "
+        "По кластерам — видно, как точки одной базы разбиты на группы, "
+        "внутри которых и считаются маршруты.",
+    )
+
+visible = rows if chosen == "Все" else [r for r in rows if r.label == chosen]
+
+if painting == "по базам":
+    site_labels = result.sites["depot"].tolist()
+else:
+    # Метка кластера уникальна только внутри базы, поэтому пары
+    # (база, кластер) нумеруются сквозным номером — иначе кластер 0
+    # у всех баз получил бы один цвет.
+    pairs = sorted(set(zip(result.sites["depot"], result.sites["cluster"])))
+    order = {pair: i for i, pair in enumerate(pairs)}
+    site_labels = [order[p] for p in zip(result.sites["depot"], result.sites["cluster"])]
+
+fmap = plot_sites(
+    list(result.sites[["lat", "lon"]].itertuples(index=False, name=None)),
+    labels=site_labels,
+    radius=3,
+)
+plot_depots(depots, fmap=fmap, names=depots_df.get("name"))
+plot_routes(
+    [row.polyline for row in visible],
+    fmap=fmap,
+    colors=[row.colour for row in visible],
+    labels=[row.label for row in visible],
+)
+st_folium(fmap, height=560, use_container_width=True, returned_objects=[])
+
+# ---------------------------------------------------------------- таблица
 st.subheader("Маршруты по машинам")
-table = result.routes_table()
-st.dataframe(table, use_container_width=True, hide_index=True)
+
+table = pd.DataFrame(
+    [
+        {
+            "": "",  # плашка цвета, связывает строку с линией на карте
+            "База": r.depot,
+            "Кластер": r.cluster,
+            "Машина": r.vehicle,
+            "Точек": r.stops,
+            "Пробег, км": r.distance_km,
+            "Время, мин": r.duration_min,
+            "Загрузка": r.load,
+            "Загрузка, %": round(100 * r.load / max(int(capacity), 1)),
+        }
+        for r in rows
+    ]
+)
+
+
+def paint(frame: pd.DataFrame) -> pd.DataFrame:
+    styles = pd.DataFrame("", index=frame.index, columns=frame.columns)
+    for i, row in enumerate(rows):
+        colour = CSS_COLOR.get(row.colour, row.colour)
+        styles.iloc[i, 0] = f"background-color: {colour}"
+    return styles
+
+
+st.dataframe(
+    table.style.apply(paint, axis=None).format({"Пробег, км": "{:.2f}"}),
+    width="stretch",
+    hide_index=True,
+)
+st.caption(
+    "Цвет плашки совпадает с цветом маршрута на карте. "
+    "Чтобы посмотреть один маршрут отдельно, выберите его в списке над картой."
+)
 st.download_button(
-    "Скачать csv", table.to_csv(index=False).encode("utf-8"), "routes.csv", "text/csv"
+    "Скачать csv",
+    table.drop(columns=[""]).to_csv(index=False).encode("utf-8-sig"),
+    "routes.csv",
+    "text/csv",
 )
