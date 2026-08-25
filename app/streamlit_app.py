@@ -227,9 +227,10 @@ with st.spinner("Считаем маршруты…"):
         st.caption(f"Подробности в журнале: `{LOG_PATH}`")
         st.stop()
 logger.info(
-    "Готово: {} кластеров, {} маршрутов, {:.1f} км, не распределено {}",
+    "Готово: {} кластеров, {} маршрутов, {:.1f} км, "
+    "не приняли базы {}, бросил солвер {}",
     len(result.solutions), result.vehicles_used,
-    result.total_distance_m / 1000, len(result.unassigned),
+    result.total_distance_m / 1000, len(result.unassigned), len(result.dropped),
 )
 
 rows = build_rows(result, depots)
@@ -241,12 +242,21 @@ metrics_row(
         ("Кластеров", str(len(result.solutions))),
         ("Маршрутов", str(len(rows))),
         ("Пробег, км", spaced(result.total_distance_m / 1000)),
-        ("Не распределено", str(len(result.unassigned))),
+        ("Не обслужено", str(len(result.unserved))),
     ]
 )
+# Два вида потерь лечатся по-разному, поэтому и показываются раздельно.
 if result.unassigned:
     st.warning(
-        f"{len(result.unassigned)} точек не приняла ни одна база — не хватило мощности."
+        f"{len(result.unassigned)} точек не приняла ни одна база: не хватило мощности. "
+        "Лечится мощностью баз или их количеством."
+    )
+if result.dropped:
+    st.warning(
+        f"{len(result.dropped)} точек солвер оставил без маршрута: не хватило машин "
+        "или времени смены. Увеличение штрафа тут обычно не помогает — "
+        "поднимите смену или уменьшите размер кластера. "
+        "Подробнее в docs/algorithm.md."
     )
 
 # ---------------------------------------------------------------- карта

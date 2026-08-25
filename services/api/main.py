@@ -72,8 +72,12 @@ class PlanResponse(BaseModel):
     routes: list[RouteOut]
     vehicles_used: int
     total_distance_km: float
+    #: Точки, которые не приняла ни одна база: не хватило мощности.
     unassigned: list[int]
-    elapsed_s: float
+    #: Точки, которые бросил солвер: не хватило машин или времени смены.
+    #: Отдельное поле, потому что лечится это другим — см. docs/algorithm.md.
+    dropped: list[int] = []
+    elapsed_s: float = 0.0
 
 
 @app.get("/health")
@@ -127,5 +131,6 @@ async def plan(request: PlanRequest) -> PlanResponse:
         vehicles_used=result.vehicles_used,
         total_distance_km=round(result.total_distance_m / 1000, 2),
         unassigned=result.unassigned,
+        dropped=result.dropped,
         elapsed_s=round(time.perf_counter() - started, 3),
     )

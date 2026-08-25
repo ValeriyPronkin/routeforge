@@ -31,6 +31,9 @@ def test_plan_returns_routes():
     assert body["vehicles_used"] >= 1
     assert body["total_distance_km"] > 0
     assert body["unassigned"] == []
+    # Потери солвера — отдельное поле ответа: без него клиент считал бы, что
+    # обслужены все точки, хотя часть могла остаться без маршрута.
+    assert body["dropped"] == []
     assert len(body["routes"]) == body["vehicles_used"]
 
 

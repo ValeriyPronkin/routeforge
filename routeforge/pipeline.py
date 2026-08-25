@@ -7,10 +7,11 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 import numpy as np
 import pandas as pd
+from loguru import logger
 
 from .clustering import UNASSIGNED, assign_to_depots, optimal_k_by_cluster_size
 from .config import Settings
@@ -26,8 +27,17 @@ class PlanResult:
     sites: pd.DataFrame
     #: Решения по ключу ``(depot, cluster)``.
     solutions: dict[tuple[int, int], Solution] = field(default_factory=dict)
-    #: Точки, которые не приняла ни одна база.
+    #: Точки, которые не приняла ни одна база: не хватило мощности.
     unassigned: list[int] = field(default_factory=list)
+    #: Точки, которые бросил солвер: не хватило машин или времени смены.
+    #: Это отдельный вид потерь, и путать его с предыдущим нельзя — лечится
+    #: он другим: парком и длиной смены, а не мощностью баз.
+    dropped: list[int] = field(default_factory=list)
+
+    @property
+    def unserved(self) -> list[int]:
+        """Все точки, не попавшие ни в один маршрут."""
+        return sorted({*self.unassigned, *self.dropped})
 
     @property
     def total_distance_m(self) -> int:
@@ -105,6 +115,9 @@ async def plan_routes(
             chunk = block[labels == cluster_id]
             solution = await _solve_chunk(chunk, depots[depot_id], settings, fleet)
             result.solutions[(int(depot_id), int(cluster_id))] = solution
+            # Узлы нумеруются внутри кластера, причём нулевой — это база,
+            # поэтому обслуживаемая точка n соответствует chunk.index[n - 1].
+            result.dropped.extend(int(chunk.index[n - 1]) for n in solution.dropped)
 
     result.sites = sites
     return result
@@ -123,6 +136,7 @@ async def _solve_chunk(
     )
     demands = [0, *(int(round(d)) for d in chunk["demand"])]
 
+    auto_fleet = fleet is None
     if fleet is None:
         count = estimate_vehicles(
             demands[1:],
@@ -140,13 +154,30 @@ async def _solve_chunk(
             service_time_min=settings.service_time_min,
         )
 
-    return solve_cvrp(
-        matrix,
-        demands,
-        fleet,
-        depot=0,
-        config=SolverConfig(time_limit_s=settings.solver_time_limit_s),
+    config = SolverConfig(
+        time_limit_s=settings.solver_time_limit_s,
+        drop_penalty=settings.drop_penalty,
     )
+    solution = solve_cvrp(matrix, demands, fleet, depot=0, config=config)
+
+    # Оценка числа машин по суммарному спросу бывает впритык: солверу дешевле
+    # заплатить штраф и бросить точку, чем нарушить вместимость. Терять точку
+    # молча нельзя, поэтому парк добирается по одной машине.
+    # При явно заданном парке этого не делаем — раз количество указано, значит
+    # оно и есть ограничение задачи.
+    if auto_fleet:
+        for extra in range(1, settings.auto_add_vehicles + 1):
+            if not solution.dropped:
+                break
+            bigger = replace(fleet, count=fleet.count + extra)
+            retry = solve_cvrp(matrix, demands, bigger, depot=0, config=config)
+            if len(retry.dropped) < len(solution.dropped):
+                logger.info(
+                    "Кластер: {} точек брошено при {} машинах, добавили {} -> брошено {}",
+                    len(solution.dropped), fleet.count, extra, len(retry.dropped),
+                )
+                solution = retry
+    return solution
 
 
 def plan_routes_sync(*args, **kwargs) -> PlanResult:
