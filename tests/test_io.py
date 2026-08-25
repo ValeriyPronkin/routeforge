@@ -6,7 +6,7 @@ from routeforge.io import ValidationError, coordinates_valid, normalize_columns,
 
 def test_reads_csv_with_russian_headers(tmp_path):
     path = tmp_path / "points.csv"
-    path.write_text("Id,Широта,Долгота,tko в день (кг)\n1,55.75,37.61,120\n", encoding="utf-8")
+    path.write_text("Id,Широта,Долгота,Спрос\n1,55.75,37.61,120\n", encoding="utf-8")
     df = read_points(path)
     assert list(df.columns) == ["id", "lat", "lon", "demand"]
     assert df.loc[0, "lat"] == pytest.approx(55.75)
@@ -52,6 +52,29 @@ def test_demand_defaults_to_zero(tmp_path):
     path = tmp_path / "points.csv"
     path.write_text("id,lat,lon\n1,55.75,37.61\n", encoding="utf-8")
     assert read_points(path).loc[0, "demand"] == 0.0
+
+
+def test_unrecognised_demand_column_silently_becomes_zero(tmp_path):
+    """Ловушка, о которой надо знать: маршрутизация без спроса — допустимый
+    сценарий, поэтому нераспознанный заголовок не ошибка, а ноль. Но если
+    колонка спроса в файле есть и просто названа непривычно, все точки
+    получат ноль, и солвер построит один маршрут на всё."""
+    path = tmp_path / "points.csv"
+    path.write_text("id,lat,lon,отгрузка\n1,55.75,37.61,900\n", encoding="utf-8")
+    assert read_points(path).loc[0, "demand"] == 0.0
+
+
+def test_custom_alias_can_be_registered(tmp_path):
+    from routeforge.io import COLUMN_ALIASES
+
+    path = tmp_path / "points.csv"
+    path.write_text("id,lat,lon,отгрузка\n1,55.75,37.61,900\n", encoding="utf-8")
+    original = COLUMN_ALIASES["demand"]
+    try:
+        COLUMN_ALIASES["demand"] = original + ("отгрузка",)
+        assert read_points(path).loc[0, "demand"] == 900.0
+    finally:
+        COLUMN_ALIASES["demand"] = original
 
 
 def test_null_island_is_rejected():
