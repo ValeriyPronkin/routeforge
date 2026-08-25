@@ -9,11 +9,6 @@
 объезд контейнерных площадок, развозка по магазинам, обслуживание
 оборудования на объектах.
 
-Инструмент вырос из первой из этих задач — планирования вывоза ТКО, — но
-предметной области в нём не осталось. Точка, база, спрос, вместимость машины
-это величины, а не мусорные баки: имена колонок, названия в демо-данных и
-термины в документации универсальны.
-
 ![Пример расчёта](docs/demo.png)
 
 *240 точек, 3 базы, машины вместимостью 4000 единиц спроса. Слева — распределение
@@ -98,9 +93,9 @@ print(f"{result.vehicles_used} машин, {result.total_distance_m / 1000:.0f} 
 
 ## Данные
 
-Демо-набор синтетический, генерируется скриптом. Данные, на которых
-инструмент работает в реальности, — реестры мест накопления отходов — содержат
-адресную привязку объектов и в открытый доступ не выкладываются.
+Демо-набор синтетический, генерируется скриптом. Настоящие выгрузки, на
+которых инструмент работает, содержат адресную привязку объектов и в открытый
+доступ не выкладываются.
 
 ## Документация
 
@@ -131,8 +126,5 @@ solver-sized chunks and solves a CVRP within each.
 Distances come either from the haversine formula (instant, no infrastructure)
 or from a local OSRM instance (real road network). Routing is done with
 Google OR-Tools; maps are rendered with folium.
-
-The domain it grew from is municipal waste collection, but the formulation is
-generic — retail delivery and field service fit the same shape.
 
 See [Quick start](#быстрый-старт) above; the demo runs without Docker or API keys.
