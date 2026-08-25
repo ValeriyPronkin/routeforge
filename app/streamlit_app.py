@@ -23,11 +23,13 @@ from loguru import logger  # noqa: E402
 
 from routeforge.config import Settings  # noqa: E402
 from routeforge.distance import Coord  # noqa: E402
+from routeforge.fleet import Vehicle, vehicles_from_frame  # noqa: E402
 from routeforge.io import (  # noqa: E402
     ValidationError,
     depot_capacities,
     read_depots,
     read_points,
+    read_vehicles,
 )
 from routeforge.logs import setup_logging  # noqa: E402
 from routeforge.pipeline import PlanResult, plan_routes_sync  # noqa: E402
@@ -65,14 +67,19 @@ class RouteRow:
     polyline: list[Coord]
     colour: str
 
+    #: Номер машины из реестра; пусто, когда реестра нет.
+    number: str = ""
+
     @property
     def label(self) -> str:
-        return f"База {self.depot} · кластер {self.cluster} · машина {self.vehicle}"
+        machine = self.number or f"машина {self.vehicle}"
+        return f"База {self.depot} · кластер {self.cluster} · {machine}"
 
 
 def build_rows(result: PlanResult, depots: list[Coord]) -> list[RouteRow]:
     rows: list[RouteRow] = []
     for (depot_id, cluster_id), solution in sorted(result.solutions.items()):
+        numbers = result.vehicle_ids.get((depot_id, cluster_id), [])
         chunk = result.sites[
             (result.sites["depot"] == depot_id) & (result.sites["cluster"] == cluster_id)
         ]
@@ -90,6 +97,7 @@ def build_rows(result: PlanResult, depots: list[Coord]) -> list[RouteRow]:
                     load=route.load,
                     polyline=line,
                     colour=color_for(len(rows)),
+                    number=numbers[route.vehicle] if route.vehicle < len(numbers) else "",
                 )
             )
     return rows
@@ -120,6 +128,7 @@ with st.sidebar:
     # к базе, и только потом точки базы дробятся на кластеры.
     uploaded_depots = st.file_uploader("Базы (csv или xlsx)", type=["csv", "xlsx"])
     uploaded = st.file_uploader("Точки (csv или xlsx)", type=["csv", "xlsx"])
+    uploaded_vehicles = st.file_uploader("Машины (csv или xlsx)", type=["csv", "xlsx"])
     st.caption(
         "Это две разные сущности: базы — откуда машина выезжает и куда "
         "возвращается, точки — что она объезжает. Структура обоих файлов "
@@ -133,6 +142,7 @@ with st.sidebar:
         depots_df = (
             read_depots(uploaded_depots) if uploaded_depots is not None else sample_depots
         )
+        vehicles_df = read_vehicles(uploaded_vehicles) if uploaded_vehicles is not None else None
     except (ValidationError, FileNotFoundError) as exc:
         st.error(str(exc))
         st.stop()
@@ -160,7 +170,14 @@ with st.sidebar:
     osrm_url = st.text_input("Адрес OSRM", "http://localhost:5000", disabled=method != "osrm")
 
     st.header("Парк")
-    capacity = st.number_input("Вместимость машины", 100, 100_000, 4000, step=100)
+    if vehicles_df is not None:
+        # С реестром вместимость у каждой машины своя, и общий виджет ей не
+        # указ. Смена остаётся: она нужна тем строкам, где не заполнена.
+        st.success(f"Реестр: {len(vehicles_df)} машин, вместимость из файла.")
+        capacity = int(vehicles_df["capacity"].max())
+    else:
+        capacity = st.number_input("Вместимость машины", 100, 100_000, 4000, step=100)
+        st.caption("Без файла машин парк однородный, а его размер подбирается расчётом.")
     shift = st.number_input("Смена, мин", 60, 1440, 480, step=30)
     speed = st.number_input("Средняя скорость, км/ч", 5.0, 120.0, 40.0, step=5.0)
     service = st.number_input("Время на точке, мин", 0, 120, 10)
@@ -243,8 +260,14 @@ logger.info(
 )
 with st.spinner("Считаем маршруты…"):
     try:
+        vehicles: list[Vehicle] | None = (
+            vehicles_from_frame(vehicles_df, default_max_time_min=int(shift))
+            if vehicles_df is not None
+            else None
+        )
         result = plan_routes_sync(
-            sites, depots, settings=settings, depot_capacities=capacities
+            sites, depots, settings=settings,
+            depot_capacities=capacities, vehicles=vehicles,
         )
     except RuntimeError as exc:
         logger.exception("Расчёт не удался")
@@ -329,18 +352,32 @@ st_folium(fmap, height=560, use_container_width=True, returned_objects=[])
 # ---------------------------------------------------------------- таблица
 st.subheader("Маршруты по машинам")
 
+
+def capacity_of(row: RouteRow) -> int:
+    """Вместимость машины этого маршрута.
+
+    С реестром машины разные, и делить всё на одно число нельзя: маршрут
+    шеститонника выглядел бы недогруженным рядом с четырёхтонником.
+    """
+    if row.number and vehicles_df is not None:
+        own = vehicles_df.loc[vehicles_df["id"] == row.number, "capacity"]
+        if len(own):
+            return int(own.iloc[0])
+    return int(capacity)
+
+
 table = pd.DataFrame(
     [
         {
             "": "",  # плашка цвета, связывает строку с линией на карте
             "База": r.depot,
             "Кластер": r.cluster,
-            "Машина": r.vehicle,
+            "Машина": r.number or str(r.vehicle),
             "Точек": r.stops,
             "Пробег, км": r.distance_km,
             "Время, мин": r.duration_min,
             "Загрузка": r.load,
-            "Загрузка, %": round(100 * r.load / max(int(capacity), 1)),
+            "Загрузка, %": round(100 * r.load / max(capacity_of(r), 1)),
         }
         for r in rows
     ]

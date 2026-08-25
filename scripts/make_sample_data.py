@@ -61,11 +61,26 @@ def main() -> None:
         [{"id": f"D{i}", "name": n, "lat": la, "lon": lo, "capacity": 60_000} for i, (n, la, lo) in enumerate(DEPOTS)]
     )
 
+    # Реестр машин: намеренно разнородный, чтобы образец показывал главное —
+    # у каждой строки своя вместимость, а привязка к базе необязательна.
+    vehicles = pd.DataFrame(
+        [
+            {"id": "А101ВС", "capacity": 4000, "max_time_min": 480, "depot": 0},
+            {"id": "А102ВС", "capacity": 6000, "max_time_min": 480, "depot": 0},
+            {"id": "В201ОР", "capacity": 4000, "max_time_min": 480, "depot": 1},
+            {"id": "В202ОР", "capacity": 3000, "max_time_min": 300, "depot": 1},
+            {"id": "С301МН", "capacity": 6000, "max_time_min": 480, "depot": 2},
+            {"id": "С302МН", "capacity": 4000, "max_time_min": "", "depot": ""},
+        ]
+    )
+
     args.out.mkdir(parents=True, exist_ok=True)
     sites.to_csv(args.out / "sites.csv", index=False)
     depots.to_csv(args.out / "depots.csv", index=False)
+    vehicles.to_csv(args.out / "vehicles.csv", index=False)
     print(f"{len(sites)} точек -> {args.out / 'sites.csv'}")
     print(f"{len(depots)} баз   -> {args.out / 'depots.csv'}")
+    print(f"{len(vehicles)} машин -> {args.out / 'vehicles.csv'}")
     print(f"суммарный спрос: {sites['demand'].sum():,} ед.")
 
 
