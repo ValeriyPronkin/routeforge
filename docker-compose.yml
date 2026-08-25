@@ -1,0 +1,55 @@
+# Сервисный контур: API поверх routeforge, OSRM для дорожных расстояний,
+# Prometheus и Grafana для метрик.
+#
+#   docker compose up api                      # только API, расстояния по прямой
+#   docker compose --profile road up           # + OSRM
+#   docker compose --profile monitoring up     # + Prometheus и Grafana
+#
+# Порты сервисов и порты, на которых они слушают внутри контейнера,
+# намеренно совпадают — рассогласование этих двух чисел это классический
+# способ получить контур, который поднимается, но не работает.
+
+services:
+  api:
+    build:
+      context: .
+      dockerfile: services/api/Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      ROUTEFORGE_OSRM_URL: http://osrm:5000
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  osrm:
+    profiles: ["road"]
+    image: ghcr.io/project-osrm/osrm-backend
+    command: osrm-routed --algorithm mld /data/region.osrm
+    volumes:
+      - ./osrm-data:/data
+    ports:
+      - "5000:5000"
+
+  prometheus:
+    profiles: ["monitoring"]
+    image: prom/prometheus:v2.53.0
+    volumes:
+      - ./services/monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "9090:9090"
+    depends_on:
+      - api
+
+  grafana:
+    profiles: ["monitoring"]
+    image: grafana/grafana:11.1.0
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+    ports:
+      - "3000:3000"
+    depends_on:
+      - prometheus

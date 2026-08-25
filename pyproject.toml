@@ -1,0 +1,49 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "routeforge"
+version = "0.1.0"
+description = "Cluster-first, route-second planner for capacitated vehicle routing over real road networks"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.9"
+authors = [{ name = "Valeriy Pronkin" }]
+keywords = ["vrp", "cvrp", "tsp", "ortools", "osrm", "routing", "logistics", "clustering"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Topic :: Scientific/Engineering :: Mathematics",
+]
+
+dependencies = [
+    "numpy>=1.24",
+    "pandas>=2.0",
+    "scikit-learn>=1.3",
+    "scikit-learn-extra>=0.3",
+    "ortools>=9.7",
+    "aiohttp>=3.9",
+    "folium>=0.15",
+    "polyline>=2.0",
+    "geopy>=2.4",
+    "openpyxl>=3.1",
+    "loguru>=0.7",
+    "omegaconf>=2.3",
+]
+
+[project.optional-dependencies]
+app = ["streamlit>=1.34", "streamlit-folium>=0.20", "matplotlib>=3.7"]
+mip = ["pyomo>=6.7"]
+api = ["fastapi>=0.110", "uvicorn[standard]>=0.29", "prometheus-client>=0.20"]
+dev = ["pytest>=8.0", "pytest-asyncio>=0.23", "aioresponses>=0.7", "httpx>=0.27"]
+
+[project.urls]
+Homepage = "https://github.com/ValeriyPronkin/routeforge"
+
+[tool.setuptools.packages.find]
+include = ["routeforge*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"

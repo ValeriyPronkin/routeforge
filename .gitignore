@@ -1,0 +1,29 @@
+# секреты
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+.pytest_cache/
+.coverage
+htmlcov/
+.ipynb_checkpoints/
+
+# ОС и IDE
+.DS_Store
+.idea/
+.vscode/
+
+# результаты расчётов
+data/output/
+*.log
+
+# данные OSRM
+osrm-data/
+*.osm.pbf
+*.osrm*
