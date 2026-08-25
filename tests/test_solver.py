@@ -56,7 +56,7 @@ def test_drop_penalty_none_makes_the_problem_infeasible(matrix):
 
 
 def test_separate_start_and_end_depots():
-    # Гараж и полигон — разные точки: выезд из 0, возврат в 1.
+    # Гараж и склад — разные точки: выезд из 0, возврат в 1.
     points = [(55.70, 37.50), (55.85, 37.80), (55.75, 37.61), (55.78, 37.65)]
     matrix = haversine_matrix(points, points)
     sol = solve_cvrp(
