@@ -23,7 +23,12 @@ from loguru import logger  # noqa: E402
 
 from routeforge.config import Settings  # noqa: E402
 from routeforge.distance import Coord  # noqa: E402
-from routeforge.io import ValidationError, read_points  # noqa: E402
+from routeforge.io import (  # noqa: E402
+    ValidationError,
+    depot_capacities,
+    read_depots,
+    read_points,
+)
 from routeforge.logs import setup_logging  # noqa: E402
 from routeforge.pipeline import PlanResult, plan_routes_sync  # noqa: E402
 from routeforge.polylines import straight_polylines  # noqa: E402
@@ -93,7 +98,7 @@ def build_rows(result: PlanResult, depots: list[Coord]) -> list[RouteRow]:
 @st.cache_data
 def load_sample() -> tuple[pd.DataFrame, pd.DataFrame]:
     sites = read_points(ROOT / "data/sample/sites.csv")
-    depots = pd.read_csv(ROOT / "data/sample/depots.csv")
+    depots = read_depots(ROOT / "data/sample/depots.csv")
     return sites, depots
 
 
@@ -111,7 +116,40 @@ def spaced(number: float) -> str:
 # ---------------------------------------------------------------- сайдбар
 with st.sidebar:
     st.header("Данные")
+    # Базы первыми: по ним точки и разбираются — сначала каждая приписывается
+    # к базе, и только потом точки базы дробятся на кластеры.
+    uploaded_depots = st.file_uploader("Базы (csv или xlsx)", type=["csv", "xlsx"])
     uploaded = st.file_uploader("Точки (csv или xlsx)", type=["csv", "xlsx"])
+    st.caption(
+        "Это две разные сущности: базы — откуда машина выезжает и куда "
+        "возвращается, точки — что она объезжает. Структура обоих файлов "
+        "описана в README, раздел «Входные файлы». Без своих файлов "
+        "показывается демо-набор."
+    )
+
+    try:
+        sample_sites, sample_depots = load_sample()
+        sites = read_points(uploaded) if uploaded is not None else sample_sites
+        depots_df = (
+            read_depots(uploaded_depots) if uploaded_depots is not None else sample_depots
+        )
+    except (ValidationError, FileNotFoundError) as exc:
+        st.error(str(exc))
+        st.stop()
+
+    if uploaded is not None and uploaded_depots is None:
+        # Самый неприятный из возможных исходов — не ошибка, а ноль маршрутов:
+        # свои точки считаются относительно демонстрационных баз, до которых
+        # не доехать за смену. Молчать об этом нельзя.
+        st.warning(
+            "Точки ваши, а базы демонстрационные — под Челябинском. Если ваши "
+            "точки в другом регионе, маршруты не построятся: до базы не "
+            "доехать за смену. Загрузите файл баз."
+        )
+
+    depots: list[Coord] = list(depots_df[["lat", "lon"]].itertuples(index=False, name=None))
+    depot_names = depots_df["name"].tolist()
+    capacities = depot_capacities(depots_df)
 
     st.header("Расстояния")
     method = st.radio(
@@ -166,19 +204,6 @@ with st.expander("Что означают «база», «кластер» и «
         """
     )
 
-try:
-    if uploaded is not None:
-        sites = read_points(uploaded)
-        depots_df = load_sample()[1]
-        st.info("Загружены ваши точки; базы взяты из демо-набора.")
-    else:
-        sites, depots_df = load_sample()
-except (ValidationError, FileNotFoundError) as exc:
-    st.error(str(exc))
-    st.stop()
-
-depots: list[Coord] = list(depots_df[["lat", "lon"]].itertuples(index=False, name=None))
-
 # ---------------------------------------------------------------- до расчёта
 if not run:
     metrics_row(
@@ -189,7 +214,7 @@ if not run:
         ]
     )
     fmap = plot_sites(list(sites[["lat", "lon"]].itertuples(index=False, name=None)))
-    plot_depots(depots, fmap=fmap, names=depots_df.get("name"))
+    plot_depots(depots, fmap=fmap, names=depot_names)
     # у st_folium width — это ширина в пикселях, а не режим,
     # поэтому здесь остаётся собственный флаг компонента
     st_folium(fmap, height=560, use_container_width=True, returned_objects=[])
@@ -219,7 +244,7 @@ logger.info(
 with st.spinner("Считаем маршруты…"):
     try:
         result = plan_routes_sync(
-            sites, depots, settings=settings, depot_capacities=list(depots_df["capacity"])
+            sites, depots, settings=settings, depot_capacities=capacities
         )
     except RuntimeError as exc:
         logger.exception("Расчёт не удался")
@@ -292,7 +317,7 @@ fmap = plot_sites(
     labels=site_labels,
     radius=3,
 )
-plot_depots(depots, fmap=fmap, names=depots_df.get("name"))
+plot_depots(depots, fmap=fmap, names=depot_names)
 plot_routes(
     [row.polyline for row in visible],
     fmap=fmap,
