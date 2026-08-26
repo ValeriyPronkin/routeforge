@@ -38,6 +38,11 @@ class PlanResult:
     #: решения: ``vehicle_ids[key][route.vehicle]`` — номер этой машины.
     #: Пусто, когда расчёт шёл без реестра и машины безымянны.
     vehicle_ids: dict[tuple[int, int], list[str]] = field(default_factory=dict)
+    #: Реестр машин, как он выглядит после расчёта: у каждой машины виден
+    #: остаток смены. Копия переданного в ``plan_routes`` — исходный список
+    #: расчёт не трогает, иначе второй запуск начинался бы с исчерпанным
+    #: парком. Пусто, когда реестра не было.
+    vehicles: list[Vehicle] = field(default_factory=list)
 
     @property
     def unserved(self) -> list[int]:
@@ -51,6 +56,55 @@ class PlanResult:
     @property
     def vehicles_used(self) -> int:
         return sum(s.vehicles_used for s in self.solutions.values())
+
+    def vehicles_table(self) -> pd.DataFrame:
+        """Сводка по машинам: чем занят парк.
+
+        Строка на каждую машину реестра, включая те, что никуда не поехали:
+        простаивающая машина — такой же результат расчёта, как загруженная, и
+        видеть её нужно. Без реестра сводка строится по номерам из решений, и
+        тогда в ней только те, кто работал.
+
+        Колонки: число рейсов и точек, пробег, вывезенный объём (в единицах
+        спроса), отработанное время, доля смены и её остаток.
+        """
+        routes = self.routes_table()
+        worked = (
+            routes[routes["vehicle_id"] != ""]
+            .groupby("vehicle_id")
+            .agg(
+                routes_count=("vehicle_id", "size"),
+                stops=("stops", "sum"),
+                distance_km=("distance_km", "sum"),
+                load=("load", "sum"),
+                duration_min=("duration_min", "sum"),
+            )
+        )
+
+        known = {v.id: v for v in self.vehicles}
+        order = list(known) or list(worked.index)
+        rows = []
+        for number in order:
+            row = worked.loc[number] if number in worked.index else None
+            vehicle = known.get(number)
+            duration = int(row["duration_min"]) if row is not None else 0
+            shift = vehicle.max_time_min if vehicle else duration
+            rows.append(
+                {
+                    "vehicle_id": number,
+                    "routes": int(row["routes_count"]) if row is not None else 0,
+                    "stops": int(row["stops"]) if row is not None else 0,
+                    "distance_km": round(float(row["distance_km"]), 2) if row is not None else 0.0,
+                    "load": int(row["load"]) if row is not None else 0,
+                    "duration_min": duration,
+                    "shift_used_pct": round(100 * duration / shift) if shift else 0,
+                    # Остаток берётся у машины, а не считается вычитанием:
+                    # ниже порога он обнулён, и это осмысленный ноль — на
+                    # линию с таким остатком не выезжают.
+                    "remaining_min": vehicle.remaining_min if vehicle else 0,
+                }
+            )
+        return pd.DataFrame(rows)
 
     def routes_table(self) -> pd.DataFrame:
         """Плоская таблица маршрутов — то, что уходит в отчёт."""
@@ -119,13 +173,17 @@ async def plan_routes(
     result = PlanResult(sites=sites)
     result.unassigned = sites.index[sites["depot"] == UNASSIGNED].tolist()
 
+    # Копия: расчёт списывает остаток смены, и делать это в списке
+    # вызывающего нельзя — второй запуск начался бы с уже уставшим парком.
+    own_vehicles = [replace(v) for v in vehicles] if vehicles is not None else None
+    result.vehicles = own_vehicles or []
     pool = (
         VehiclePool(
-            vehicles,
+            own_vehicles,
             min_remaining_min=settings.vehicle_min_remaining_min,
             capacity_reserve=settings.fleet_capacity_reserve,
         )
-        if vehicles is not None
+        if own_vehicles is not None
         else None
     )
 

@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import io
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -30,6 +31,7 @@ from routeforge.io import (  # noqa: E402
     read_depots,
     read_points,
     read_vehicles,
+    write_report,
 )
 from routeforge.logs import setup_logging  # noqa: E402
 from routeforge.pipeline import PlanResult, plan_routes_sync  # noqa: E402
@@ -252,6 +254,10 @@ settings = Settings(
     vehicle_speed_kmh=float(speed),
     service_time_min=int(service),
     solver_time_limit_s=int(time_limit),
+    # Параметры раздачи парка виджетами не задаются: их место в config.yaml,
+    # но до расчёта они дойти обязаны, иначе файл настроек ни на что не влияет.
+    vehicle_min_remaining_min=BASE.vehicle_min_remaining_min,
+    fleet_capacity_reserve=BASE.fleet_capacity_reserve,
 )
 
 logger.info(
@@ -401,9 +407,64 @@ st.caption(
     "Цвет плашки совпадает с цветом маршрута на карте. "
     "Чтобы посмотреть один маршрут отдельно, выберите его в списке над картой."
 )
-st.download_button(
-    "Скачать csv",
-    table.drop(columns=[""]).to_csv(index=False).encode("utf-8-sig"),
+# ---------------------------------------------------------------- сводка
+routes_report = table.drop(columns=[""])
+
+summary = result.vehicles_table()
+if not summary.empty:
+    st.subheader("Сводка по машинам")
+    summary_report = summary.rename(
+        columns={
+            "vehicle_id": "Машина",
+            "routes": "Рейсов",
+            "stops": "Точек",
+            "distance_km": "Пробег, км",
+            "load": "Вывезено",
+            "duration_min": "Время, мин",
+            "shift_used_pct": "Смена, %",
+            "remaining_min": "Остаток, мин",
+        }
+    )
+    st.dataframe(
+        summary_report.style.format({"Пробег, км": "{:.2f}"}),
+        width="stretch",
+        hide_index=True,
+    )
+    idle = int((summary["routes"] == 0).sum())
+    st.caption(
+        "Строка на каждую машину реестра. "
+        + (
+            f"Не выезжали: {idle}. "
+            if idle
+            else "Все машины были в работе. "
+        )
+        + "«Остаток» — сколько времени смены у машины ещё есть; "
+        f"меньше {BASE.vehicle_min_remaining_min} минут обнуляется, "
+        "с таким остатком на линию не выезжают."
+    )
+else:
+    summary_report = summary
+
+# ---------------------------------------------------------------- выгрузка
+report = io.BytesIO()
+sheets = {"Маршруты": routes_report}
+if not summary_report.empty:
+    sheets["Машины"] = summary_report
+write_report(sheets, report)
+
+left_button, right_button = st.columns(2)
+left_button.download_button(
+    "Скачать отчёт xlsx",
+    report.getvalue(),
+    "routes.xlsx",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    width="stretch",
+    help="Два листа: маршруты и сводка по машинам.",
+)
+right_button.download_button(
+    "Скачать маршруты csv",
+    routes_report.to_csv(index=False).encode("utf-8-sig"),
     "routes.csv",
     "text/csv",
+    width="stretch",
 )

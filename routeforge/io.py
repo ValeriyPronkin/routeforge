@@ -294,6 +294,32 @@ def coords_array(df: pd.DataFrame) -> list[tuple[float, float]]:
     return list(df[["lat", "lon"]].itertuples(index=False, name=None))
 
 
+def write_report(
+    tables: dict[str, pd.DataFrame],
+    target: str | Path | IO[bytes],
+) -> None:
+    """Пишет отчёт из нескольких листов в один xlsx.
+
+    Отчёт по расчёту — это не одна таблица: маршруты отвечают на вопрос
+    «куда ехать», сводка по машинам — «чем занят парк», и разносить их по
+    файлам неудобно тому, кто потом с ними работает.
+
+    :param tables: имя листа -> таблица. Порядок сохраняется.
+    :param target: путь или открытый файловый объект. Второе нужно, чтобы
+        отдать отчёт на скачивание, не создавая файла на диске.
+    """
+    if not tables:
+        raise ValueError("отчёт без таблиц")
+    if isinstance(target, (str, Path)):
+        target = Path(target)
+        target.parent.mkdir(parents=True, exist_ok=True)
+    with pd.ExcelWriter(target, engine="openpyxl") as writer:
+        for sheet, table in tables.items():
+            # Лист без строк Excel всё равно должен показать заголовки:
+            # пустая сводка это тоже ответ, а не сломанный файл.
+            table.to_excel(writer, sheet_name=sheet[:31], index=False)
+
+
 def write_routes(
     df: pd.DataFrame,
     path: str | Path,

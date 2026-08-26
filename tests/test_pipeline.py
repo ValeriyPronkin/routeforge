@@ -256,3 +256,65 @@ async def test_registry_beats_the_estimate(sites):
     one = registry(("А001", 10_000, 480))
     result = await plan_routes(sites, DEPOTS, settings=Settings(**REGISTRY), vehicles=one)
     assert set(result.routes_table()["vehicle_id"]) == {"А001"}
+
+
+async def test_vehicles_summary_counts_the_work(sites):
+    fleet = registry(("А001", 4000, 480), ("В002", 4000, 480))
+    result = await plan_routes(sites, DEPOTS, settings=Settings(**REGISTRY), vehicles=fleet)
+    summary = result.vehicles_table().set_index("vehicle_id")
+    routes = result.routes_table()
+
+    for number, row in summary.iterrows():
+        own = routes[routes["vehicle_id"] == number]
+        assert row["routes"] == len(own)
+        assert row["stops"] == own["stops"].sum()
+        assert row["duration_min"] == own["duration_min"].sum()
+        assert row["distance_km"] == pytest.approx(own["distance_km"].sum(), abs=0.01)
+
+
+async def test_idle_vehicle_is_still_a_row(sites):
+    """Простаивающая машина — такой же результат, как загруженная.
+
+    Если показывать только тех, кто работал, из отчёта не увидеть, что парк
+    наполовину простоял, — а это первое, что нужно знать при разборе.
+    """
+    # Обе машины приписаны к базе 0, а кластер там один и его увозит первая:
+    # второй просто нечего делать.
+    fleet = [
+        Vehicle(id="Работяга", capacity=100_000, max_time_min=480, depot=0),
+        Vehicle(id="Простой", capacity=100_000, max_time_min=480, depot=0),
+        Vehicle(id="Южный", capacity=100_000, max_time_min=480, depot=1),
+    ]
+    settings = Settings(**{**REGISTRY, "max_sites_per_cluster": 50})
+    result = await plan_routes(sites, DEPOTS, settings=settings, vehicles=fleet)
+    summary = result.vehicles_table().set_index("vehicle_id")
+
+    assert set(summary.index) == {"Работяга", "Простой", "Южный"}
+    idle = summary.loc["Простой"]
+    assert idle["routes"] == 0
+    assert idle["distance_km"] == 0
+    assert idle["remaining_min"] == 480, "простоявшая машина сохраняет всю смену"
+    assert summary.loc["Работяга", "routes"] >= 1
+
+
+async def test_registry_of_the_caller_is_not_spent(sites):
+    """Расчёт не должен трогать переданный реестр.
+
+    Иначе второй запуск начинался бы с уже уставшим парком — в интерфейсе
+    это выглядело бы как «посчитал дважды, второй раз машин нет».
+    """
+    fleet = registry(("А001", 4000, 480), ("В002", 4000, 480))
+    before = [v.remaining_min for v in fleet]
+    first = await plan_routes(sites, DEPOTS, settings=Settings(**REGISTRY), vehicles=fleet)
+    assert [v.remaining_min for v in fleet] == before
+
+    second = await plan_routes(sites, DEPOTS, settings=Settings(**REGISTRY), vehicles=fleet)
+    assert second.vehicles_used == first.vehicles_used
+    assert len(second.dropped) == len(first.dropped)
+    # А в результате остаток виден — там реестр после работы.
+    assert any(v.remaining_min < v.max_time_min for v in first.vehicles)
+
+
+async def test_summary_without_registry_lists_only_those_who_worked(sites):
+    result = await plan_routes(sites, DEPOTS, settings=FAST)
+    assert result.vehicles_table().empty, "без реестра машины безымянны, сводке не из чего строиться"

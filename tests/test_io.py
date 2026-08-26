@@ -10,6 +10,7 @@ from routeforge.io import (
     normalize_columns,
     read_depots,
     read_points,
+    write_report,
 )
 
 
@@ -207,3 +208,42 @@ def test_depots_file_without_coordinates_gives_actionable_error():
         read_depots(UploadedFile(b"id,address\nD0,Chelyabinsk\n", "bazy.csv"))
     assert "файле баз" in str(exc.value)
     assert "address" in str(exc.value)
+
+
+def test_report_has_a_sheet_per_table():
+    """Отчёт — один файл на два вопроса: куда ехать и чем занят парк."""
+    buffer = io.BytesIO()
+    write_report(
+        {
+            "Маршруты": pd.DataFrame([{"База": 0, "Машина": "А001", "Пробег, км": 12.5}]),
+            "Машины": pd.DataFrame([{"Машина": "А001", "Рейсов": 1}]),
+        },
+        buffer,
+    )
+    buffer.seek(0)
+    book = pd.read_excel(buffer, sheet_name=None)
+    assert list(book) == ["Маршруты", "Машины"]
+    assert book["Маршруты"].loc[0, "Машина"] == "А001"
+    assert book["Машины"].loc[0, "Рейсов"] == 1
+
+
+def test_empty_summary_still_keeps_its_headers():
+    """Пустая сводка — это ответ «никто не поехал», а не сломанный файл."""
+    buffer = io.BytesIO()
+    write_report({"Машины": pd.DataFrame(columns=["Машина", "Рейсов"])}, buffer)
+    buffer.seek(0)
+    table = pd.read_excel(buffer, sheet_name="Машины")
+    assert list(table.columns) == ["Машина", "Рейсов"]
+    assert table.empty
+
+
+def test_report_writes_to_a_path(tmp_path):
+    target = tmp_path / "отчёт" / "routes.xlsx"
+    write_report({"Маршруты": pd.DataFrame([{"a": 1}])}, target)
+    assert target.exists()
+    assert pd.read_excel(target).loc[0, "a"] == 1
+
+
+def test_report_without_tables_is_an_error():
+    with pytest.raises(ValueError, match="без таблиц"):
+        write_report({}, io.BytesIO())
